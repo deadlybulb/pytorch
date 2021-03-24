@@ -158,7 +158,7 @@ TEST(InferenceModeTest, TestInferenceTensorInNormalModeInplaceOp) {
       inference_tensor = torch::ones({1, 2, 3});
     }
     ASSERT_THROWS_WITH(inplace_op(inference_tensor), // go through kernels: InplaceOrView(ERROR!), CPU
-      "inplace/view ops on inference tensor outside InferenceMode");
+      "Inplace update to inference tensor outside InferenceMode is not allowed.")
   }
 }
 
@@ -170,7 +170,7 @@ TEST(InferenceModeTest, TestInferenceTensorInNormalModeViewOp) {
       inference_tensor = torch::ones({1, 2, 3});
     }
     ASSERT_THROWS_WITH(view_op(inference_tensor), // go through kernels: InplaceOrView(ERROR!), CPU
-      "inplace/view ops on inference tensor outside InferenceMode")
+      "Calling view ops on inference tensor outside InferenceMode is not allowed")
   }
 }
 
@@ -192,9 +192,8 @@ TEST(InferenceModeTest, TestNormalTensorInplaceOpInInferenceMode) {
       ASSERT_EQ(a.requires_grad(), requires_grad);
 
       // inplace -> inplace -> view
-      torch::Tensor view_out = view_op(a);
+      torch::Tensor view_out = view_op(a);  // go through kernels: InplaceOrView, CPU
       ASSERT_FALSE(is_inference_tensor(view_out));
-      // WHY??
       ASSERT_EQ(view_out.requires_grad(), requires_grad);
     }
   }
@@ -311,25 +310,34 @@ TEST(InferenceModeTest, TestMixInferenceAndNormalTensorFunctionalOp) {
       c = torch::ones({1, 2, 3});
     }
 
-    ASSERT_THROWS_WITH(c.add(s), // go through kernels: VariableType(ERROR!), InplaceOrView(fallthrough), CPU
-      "Inference tensor cannot participate in autograd")
+    torch::Tensor out = c.add(s);  // go through kernels: VariableType, InplaceOrView(fallthrough), CPU
+    ASSERT_FALSE(is_inference_tensor(out));
+    ASSERT_EQ(out.requires_grad(), requires_grad);
   }
 }
 
 TEST(InferenceModeTest, TestMixInferenceAndNormalTensorInplaceOp) {
   for (bool requires_grad: {true, false}) {
     torch::Tensor s = torch::ones({1, 2, 3}).set_requires_grad(requires_grad);
+    torch::Tensor a = s + 2;
     torch::Tensor c;
     {
       InferenceMode guard;
       c = torch::ones({1, 2, 3});
     }
 
-    ASSERT_THROWS_WITH(c.add_(s), // go through kernels: VariableType(ERROR!), InplaceOrView, CPU
-      "Inference tensor cannot participate in autograd")
+    a.add_(c); // go through kernels: VariableType, InferenceMode, CPU
 
-    ASSERT_THROWS_WITH(torch::add_out(c, s, s), // go through kernels: VariableType(ERROR!), InplaceOrView, CPU
-      "Inference tensor cannot participate in autograd")
+    ASSERT_THROWS_WITH(c.add_(s), // go through kernels: VariableType, InplaceOrView, CPU
+      "Inplace update to inference tensor outside InferenceMode is not allowed.")
+
+    if (requires_grad) {
+      ASSERT_THROWS_WITH(torch::add_out(c, s, s), // go through kernels: VariableType, InplaceOrView, CPU
+        "out=... arguments don't support automatic differentiation, but one of the arguments requires grad")
+    } else {
+      ASSERT_THROWS_WITH(torch::add_out(c, s, s), // go through kernels: VariableType, InplaceOrView, CPU
+        "Inplace update to inference tensor outside InferenceMode is not allowed.")
+    }
   }
 }
 
@@ -345,7 +353,7 @@ TEST(InferenceModeTest, TestMixInferenceAndNormalTensorViewOp) {
     // view_as is a composite op which calls view() with only one tensor argument.
     // So there isn't a mixed inference tensor and normal tensor inputs for view ops.
     ASSERT_THROWS_WITH(c.view_as(s), // go through kernels: InplaceOrView(ERROR!), CPU
-      "inplace/view ops on inference tensor outside InferenceMode")
+      "Calling view ops on inference tensor outside InferenceMode is not allowed")
 
     // This is fine since it's equivalent as s.view(c.sizes()) which
     // isn't a mixed input scenario.

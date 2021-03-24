@@ -10,6 +10,7 @@
 #include <c10/core/DispatchKeySet.h>
 #include <c10/core/impl/LocalDispatchKeySet.h>
 #include <c10/core/impl/SizesAndStrides.h>
+#include <c10/core/InferenceMode.h>
 #include <c10/core/MemoryFormat.h>
 #include <c10/core/Storage.h>
 #include <c10/core/TensorOptions.h>
@@ -229,20 +230,33 @@ struct C10_API VariableVersion {
 
  public:
   bool unique() const {
-    return 1 == version_counter_.use_count();
+    return !this->enabled() || 1 == version_counter_.use_count();
+  }
+
+  bool enabled() const {
+    return version_counter_;
   }
   // NOTE: As of C++11 and 14, default-constructing a std::atomic variable
   // leaves it in a persistently undefined state. See
   // https://cplusplus.github.io/LWG/issue2334.
-  VariableVersion(uint32_t version = 0)
-      : version_counter_(c10::make_intrusive<VersionCounter>(version)) {}
+  VariableVersion(uint32_t version = 0, bool enabled = true) {
+    // version is only used when enabled=true.
+    if (enabled) {
+      version_counter_ = c10::make_intrusive<VersionCounter>(version);
+    }
+  }
 
-  void bump() noexcept {
+  void bump() {
+    TORCH_CHECK(this->enabled(),
+        "Inplace update to inference tensor outside InferenceMode is not allowed.",
+        "You can clarify your code by moving inplace op inside inference mode.");
     ++version_counter_->version_;
   }
 
-  uint32_t current_version() const noexcept {
-    return version_counter_->version_;
+  uint32_t current_version() const {
+    TORCH_CHECK(this->enabled(),
+        "Accessing version of inference tensor outside InferenceMode is not allowed.");
+      return version_counter_->version_;
   }
 };
 
@@ -1088,21 +1102,28 @@ struct C10_API TensorImpl : public c10::intrusive_ptr_target {
     refresh_contiguous();
   }
 
+  /*
+   * version_counter on inference tensors cannot be overwritten.
+   */
   void set_version_counter(
     const c10::VariableVersion& version_counter) noexcept {
-    version_counter_ = version_counter;
+    if (!this->is_inference_tensor()) {
+      version_counter_ = version_counter;
+    }
   }
 
   void set_version_counter(
     c10::VariableVersion&& version_counter) noexcept {
-    version_counter_ = std::move(version_counter);
+    if (!this->is_inference_tensor()) {
+      version_counter_ = std::move(version_counter);
+    }
   }
 
   const c10::VariableVersion& version_counter() const noexcept {
     return version_counter_;
   }
 
-  void bump_version() noexcept {
+  void bump_version() {
     version_counter_.bump();
   }
 
